@@ -1,0 +1,5 @@
+{
+  "crons": [
+    { "path": "/api/sync-confirmations", "schedule": "0 12 * * *" }
+  ]
+}
