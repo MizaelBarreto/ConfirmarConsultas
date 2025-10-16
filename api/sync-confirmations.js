@@ -57,6 +57,46 @@ function fromAnyDate(s) {
   return tomorrowStr();
 }
 
+// ===== Gera variações do mesmo telefone para tentar achar no TalkBI =====
+function phoneVariants(e164Phone) {
+  const set = new Set();
+  const only = String(e164Phone || '').replace(/\D/g, '');
+
+  // bases
+  set.add(`+${only}`);
+  set.add(only);
+
+  // sem 55
+  if (only.startsWith('55')) {
+    const sem55 = only.slice(2);
+    set.add(sem55);
+    set.add(`+${sem55}`);
+  }
+
+  // se 55 + DDD + 9 + 8 dígitos (13 dígitos total), tente sem o 9
+  if (only.startsWith('55') && only.length === 13) {
+    const ddd = only.slice(2, 4);
+    const nove = only.slice(4, 5);
+    const resto = only.slice(5);
+    if (nove === '9') {
+      const sem9 = `55${ddd}${resto}`; // 12 dígitos
+      set.add(sem9);
+      set.add(`+${sem9}`);
+    }
+  }
+
+  // se 55 + DDD + 8 dígitos (12), tente com o 9
+  if (only.startsWith('55') && only.length === 12) {
+    const ddd = only.slice(2, 4);
+    const resto = only.slice(4);
+    const com9 = `55${ddd}9${resto}`; // 13 dígitos
+    set.add(com9);
+    set.add(`+${com9}`);
+  }
+
+  return Array.from(set);
+}
+
 // ===== Datasigh =====
 async function getAppointments(dateStr) {
   const url = `${DATASIGH_BASE_URL}/agendas/marcadas`;
@@ -102,16 +142,28 @@ function extractSubscribers(resp) {
   if (d && d.data && Array.isArray(d.data.items)) return d.data.items;
   return [];
 }
+
+// >>> alterado: tenta múltiplas variações do telefone
 async function resolveTalkBIUserNsByPhone(e164Phone) {
   const url = `${TALKBI_BASE_URL}/subscribers`;
-  const { data } = await http.get(url, {
-    headers: talkbiHeaders(),
-    params: { phone: e164Phone, limit: 1, page: 1 }
-  });
-  const items = extractSubscribers(data);
-  const s = items[0];
-  return s ? (s.user_ns || s.ns || s.id || s.uuid || s.user_id || null) : null;
+  const variants = phoneVariants(e164Phone);
+
+  for (const phone of variants) {
+    try {
+      const { data } = await http.get(url, {
+        headers: talkbiHeaders(),
+        params: { phone, limit: 1, page: 1 }
+      });
+      const items = extractSubscribers(data);
+      const s = items[0];
+      if (s) return s.user_ns || s.ns || s.id || s.uuid || s.user_id || null;
+    } catch {
+      // ignora e tenta a próxima variação
+    }
+  }
+  return null;
 }
+
 async function sendTalkBISubFlowByName(userNs, flowName, variables) {
   const url = `${TALKBI_BASE_URL}/subscriber/send-sub-flow-by-flow-name`;
   const payload = { user_ns: userNs, flow_name: flowName };
@@ -138,7 +190,6 @@ function mapAppointmentToContact(ag) {
 
 // ===== Handler (Vercel) =====
 module.exports = async (req, res) => {
-  // Aceita GET e POST (cron da Vercel usa GET)
   if (req.method !== 'GET' && req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed. Use GET or POST.' });
   }
@@ -148,7 +199,7 @@ module.exports = async (req, res) => {
   if (typeof dryParam === 'string') process.env.DRY_RUN = String(dryParam);
 
   try {
-    // IMPORTANTE: p-queue v8 é ESM → import dinâmico aqui
+    // p-queue v8 é ESM → import dinâmico aqui
     const { default: PQueue } = await import('p-queue');
 
     // Data de entrada
@@ -178,7 +229,11 @@ module.exports = async (req, res) => {
           const userNs = await resolveTalkBIUserNsByPhone(contact.phone);
           if (!userNs) {
             skipped++;
-            errors.push({ agendamento: contact.externalId, error: 'subscriber_not_found_by_phone', phone: contact.phone });
+            errors.push({
+              agendamento: contact.externalId,
+              error: 'subscriber_not_found_by_phone',
+              phone: contact.phone
+            });
             return { status: 'skipped', reason: 'subscriber_not_found' };
           }
           await sendTalkBISubFlowByName(userNs, TALKBI_FLOW_NAME, contact.variables);
