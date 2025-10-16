@@ -124,12 +124,17 @@ function mapAppointmentToContact(ag) {
 
 /* ============ Handler Vercel ============ */
 module.exports = async (req, res) => {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed. Use POST.' });
+  // Cron da Vercel usa GET. Vamos aceitar GET e POST.
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method Not Allowed. Use GET or POST.' });
   }
 
   try {
-    const dateStr = (req.body && req.body.date) || tomorrowStr();
+    // GET: pega ?date=YYYY-MM-DD ou amanhã; POST: body.date ou amanhã
+    const dateStr =
+      (req.method === 'GET'
+        ? (req.query && req.query.date) || tomorrowStr()
+        : (req.body && req.body.date) || tomorrowStr());
     const appts = await getAppointments(dateStr);
 
     if (!appts.length) {
