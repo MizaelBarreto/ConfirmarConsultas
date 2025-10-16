@@ -4,7 +4,7 @@ const axios = require('axios');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const tz = require('dayjs/plugin/timezone');
-const PQueue = require('p-queue').default;
+// REMOVIDO: require('p-queue') (ESM-only)
 
 dayjs.extend(utc);
 dayjs.extend(tz);
@@ -16,7 +16,7 @@ const INTERVAL_CAP = Number(process.env.INTERVAL_CAP || 8);
 
 // ===== Datasigh (SEM Bearer) =====
 const DATASIGH_BASE_URL = process.env.DATASIGH_BASE_URL || 'https://ws.datasigh.com.br/api/integracao/v1';
-const DATASIGH_API_KEY = process.env.DATASIGH_API_KEY || ''; // formato: integration_hash:client_hash
+const DATASIGH_API_KEY = process.env.DATASIGH_API_KEY || ''; // integration_hash:client_hash
 const DATASIGH_DATE_FORMAT = process.env.DATASIGH_DATE_FORMAT || 'DD/MM/YYYY';
 
 // ===== TalkBI =====
@@ -30,10 +30,10 @@ const http = axios.create({ timeout: 15000 });
 const isDry = () => String(process.env.DRY_RUN || 'false').toLowerCase() === 'true';
 
 function tomorrowStr() {
-  return dayjs().tz(TIMEZONE).add(1, 'day').format('YYYY-MM-DD'); // interno
+  return dayjs().tz(TIMEZONE).add(1, 'day').format('YYYY-MM-DD');
 }
 function dsFormat(dateLike) {
-  return dayjs(dateLike).tz(TIMEZONE).format(DATASIGH_DATE_FORMAT); // Datasigh exige DD/MM/YYYY
+  return dayjs(dateLike).tz(TIMEZONE).format(DATASIGH_DATE_FORMAT);
 }
 function normalizePhoneBR(phone) {
   if (!phone) return null;
@@ -45,10 +45,9 @@ function normalizePhoneBR(phone) {
 }
 function fromAnyDate(s) {
   if (!s) return tomorrowStr();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;               // YYYY-MM-DD
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {                      // DD/MM/YYYY
-    const [d, m, y] = s.split('/');
-    return `${y}-${m}-${d}`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;              // YYYY-MM-DD
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {                    // DD/MM/YYYY
+    const [d,m,y] = s.split('/'); return `${y}-${m}-${d}`;
   }
   return tomorrowStr();
 }
@@ -58,12 +57,10 @@ async function getAppointments(dateStr) {
   const url = `${DATASIGH_BASE_URL}/agendas/marcadas`;
   const params = { data: dsFormat(dateStr) };
   const headers = { Accept: 'application/json' };
-  // IMPORTANTE: sem "Bearer"
-  if (DATASIGH_API_KEY) headers.Authorization = DATASIGH_API_KEY;
+  if (DATASIGH_API_KEY) headers.Authorization = DATASIGH_API_KEY; // << SEM Bearer
 
   try {
     const { data } = await http.get(url, { params, headers });
-    // shape: { agendas: [ ... ], datas: [...] }
     if (Array.isArray(data?.agendas)) return data.agendas;
     if (Array.isArray(data)) return data;
     return [];
@@ -72,8 +69,8 @@ async function getAppointments(dateStr) {
       message: err?.message,
       axios: {
         status: err?.response?.status,
-        data: err?.response?.data,
-        url: err?.config?.url,
+        data:   err?.response?.data,
+        url:    err?.config?.url,
         params: err?.config?.params,
         method: err?.config?.method
       }
@@ -122,21 +119,15 @@ async function sendTalkBISubFlowByName(userNs, flowName, variables) {
   return data;
 }
 
-// ===== Mapping (seu JSON do Datasigh) =====
+// ===== Mapping (Datasigh JSON) =====
 function mapAppointmentToContact(ag) {
   const name = ag?.paciente?.nome || 'Paciente';
   const phone = normalizePhoneBR(ag?.paciente?.celular);
   const externalId = String(ag?.id ?? '');
-  const horario = ag?.data; // "2025-10-15 14:30:00"
+  const horario = ag?.data;
   const profissional = ag?.profissional?.nome;
   const unidade = ag?.unidade?.nome;
-
-  return {
-    phone,
-    name,
-    externalId,
-    variables: { data_hora: horario, profissional, unidade }
-  };
+  return { phone, name, externalId, variables: { data_hora: horario, profissional, unidade } };
 }
 
 // ===== Handler (Vercel) =====
@@ -151,7 +142,10 @@ module.exports = async (req, res) => {
   if (typeof dryParam === 'string') process.env.DRY_RUN = String(dryParam);
 
   try {
-    // Data de entrada: GET usa ?date=..., POST usa body.date
+    // IMPORTANTE: p-queue v8 é ESM; usar dynamic import dentro do handler
+    const { default: PQueue } = await import('p-queue');
+
+    // Data de entrada
     const dateStr = req.method === 'GET'
       ? fromAnyDate(req.query?.date)
       : (req.body?.date || tomorrowStr());
@@ -178,11 +172,7 @@ module.exports = async (req, res) => {
           const userNs = await resolveTalkBIUserNsByPhone(contact.phone);
           if (!userNs) {
             skipped++;
-            errors.push({
-              agendamento: contact.externalId,
-              error: 'subscriber_not_found_by_phone',
-              phone: contact.phone
-            });
+            errors.push({ agendamento: contact.externalId, error: 'subscriber_not_found_by_phone', phone: contact.phone });
             return { status: 'skipped', reason: 'subscriber_not_found' };
           }
           await sendTalkBISubFlowByName(userNs, TALKBI_FLOW_NAME, contact.variables);
