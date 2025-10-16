@@ -124,19 +124,35 @@ function mapAppointmentToContact(ag) {
 
 /* ============ Handler Vercel ============ */
 module.exports = async (req, res) => {
-  // Cron da Vercel usa GET. Vamos aceitar GET e POST.
+  // Aceita GET e POST (cron da Vercel usa GET)
   if (req.method !== 'GET' && req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed. Use GET or POST.' });
   }
 
-  try {
-    // GET: pega ?date=YYYY-MM-DD ou amanhã; POST: body.date ou amanhã
-    const dateStr =
-      (req.method === 'GET'
-        ? (req.query && req.query.date) || tomorrowStr()
-        : (req.body && req.body.date) || tomorrowStr());
-    const appts = await getAppointments(dateStr);
+  // Override de DRY_RUN via query/body (?dry=true/false)
+  const dryParam = (req.method === 'GET' ? req.query?.dry : req.body?.dry);
+  if (typeof dryParam === 'string') {
+    process.env.DRY_RUN = String(dryParam);
+  }
 
+  // (Opcional) aceitar DD/MM/YYYY também
+  function fromAnyDate(s) {
+    if (!s) return tomorrowStr();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;               // YYYY-MM-DD
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {                      // DD/MM/YYYY
+      const [d,m,y] = s.split('/');
+      return `${y}-${m}-${d}`;
+    }
+    return tomorrowStr();
+  }
+
+  try {
+    // Data de entrada: GET usa ?date=..., POST usa body.date
+    const dateStr = req.method === 'GET'
+      ? fromAnyDate(req.query?.date)
+      : (req.body?.date || tomorrowStr());
+
+    const appts = await getAppointments(dateStr);
     if (!appts.length) {
       return res.json({ date: dateStr, total: 0, sent: 0, skipped: 0, errors: [] });
     }
@@ -158,7 +174,11 @@ module.exports = async (req, res) => {
           const userNs = await resolveTalkBIUserNsByPhone(contact.phone);
           if (!userNs) {
             skipped++;
-            errors.push({ agendamento: contact.externalId, error: 'subscriber_not_found_by_phone', phone: contact.phone });
+            errors.push({
+              agendamento: contact.externalId,
+              error: 'subscriber_not_found_by_phone',
+              phone: contact.phone
+            });
             return { status: 'skipped', reason: 'subscriber_not_found' };
           }
           await sendTalkBISubFlowByName(userNs, TALKBI_FLOW_NAME, contact.variables);
@@ -174,8 +194,21 @@ module.exports = async (req, res) => {
 
     await Promise.all(jobs);
     return res.json({ date: dateStr, total: appts.length, sent, skipped, errors });
+
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: err?.response?.data || err.message });
+    // << este catch é o único que responde 500 >>
+    const out = {
+      message: err?.message,
+      axios: {
+        status: err?.response?.status,
+        data:   err?.response?.data,
+        url:    err?.config?.url,
+        params: err?.config?.params,
+        method: err?.config?.method
+      }
+    };
+    console.error('sync-confirmations error:', out);
+    return res.status(500).json({ error: out });
   }
 };
+
