@@ -10,7 +10,6 @@ dayjs.extend(utc);
 dayjs.extend(tz);
 
 const TIMEZONE = process.env.TZ || 'America/Sao_Paulo';
-const DRY_RUN = String(process.env.DRY_RUN || 'false').toLowerCase() === 'true';
 const CONCURRENCY = Number(process.env.CONCURRENCY || 4);
 const INTERVAL_MS = Number(process.env.INTERVAL_MS || 1000);
 const INTERVAL_CAP = Number(process.env.INTERVAL_CAP || 8);
@@ -27,7 +26,9 @@ const TALKBI_FLOW_NAME = process.env.TALKBI_FLOW_NAME || '';
 
 const http = axios.create({ timeout: 15000 });
 
-/* ============ Utils ============ */
+// ===== Utils =====
+const isDry = () => String(process.env.DRY_RUN || 'false').toLowerCase() === 'true';
+
 function tomorrowStr() {
   return dayjs().tz(TIMEZONE).add(1, 'day').format('YYYY-MM-DD'); // interno
 }
@@ -37,14 +38,22 @@ function dsFormat(dateLike) {
 function normalizePhoneBR(phone) {
   if (!phone) return null;
   let d = String(phone).replace(/\D/g, '');
-  // datasigh manda "5511..." → remove 55 e remonta
   if (d.startsWith('55')) d = d.slice(2);
-  if (d.length === 10) d = d.slice(0, 2) + '9' + d.slice(2); // insere 9 se faltar
+  if (d.length === 10) d = d.slice(0, 2) + '9' + d.slice(2);
   if (d.length !== 11) return null;
   return `+55${d}`;
 }
+function fromAnyDate(s) {
+  if (!s) return tomorrowStr();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;               // YYYY-MM-DD
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {                      // DD/MM/YYYY
+    const [d, m, y] = s.split('/');
+    return `${y}-${m}-${d}`;
+  }
+  return tomorrowStr();
+}
 
-/* ============ Datasigh ============ */
+// ===== Datasigh =====
 async function getAppointments(dateStr) {
   const url = `${DATASIGH_BASE_URL}/agendas/marcadas`;
   const params = { data: dsFormat(dateStr) };
@@ -56,16 +65,25 @@ async function getAppointments(dateStr) {
     const { data } = await http.get(url, { params, headers });
     // shape: { agendas: [ ... ], datas: [...] }
     if (Array.isArray(data?.agendas)) return data.agendas;
-    // fallback (caso a API um dia mude)
     if (Array.isArray(data)) return data;
     return [];
   } catch (err) {
-    console.error('Datasigh error:', err?.response?.data || err.message);
+    const out = {
+      message: err?.message,
+      axios: {
+        status: err?.response?.status,
+        data: err?.response?.data,
+        url: err?.config?.url,
+        params: err?.config?.params,
+        method: err?.config?.method
+      }
+    };
+    console.error('Datasigh error:', out);
     throw err;
   }
 }
 
-/* ============ TalkBI ============ */
+// ===== TalkBI =====
 function talkbiHeaders() {
   const h = { 'Content-Type': 'application/json', Accept: 'application/json' };
   if (TALKBI_API_KEY) h.Authorization = `Bearer ${TALKBI_API_KEY}`;
@@ -74,8 +92,7 @@ function talkbiHeaders() {
 function extractSubscribers(resp) {
   let d = resp;
   if (d && d.data !== undefined) d = d.data;
-  if (d && !Array.isArray(d) && typeof d === 'object' && (d.user_ns || d.id || d.ns || d.uuid))
-    return [d];
+  if (d && !Array.isArray(d) && typeof d === 'object' && (d.user_ns || d.id || d.ns || d.uuid)) return [d];
   if (Array.isArray(d)) return d;
   if (d && Array.isArray(d.items)) return d.items;
   if (d && d.data && Array.isArray(d.data)) return d.data;
@@ -97,7 +114,7 @@ async function sendTalkBISubFlowByName(userNs, flowName, variables) {
   const payload = { user_ns: userNs, flow_name: flowName };
   if (variables && Object.keys(variables).length) payload.variables = variables;
 
-  if (DRY_RUN) {
+  if (isDry()) {
     console.log('[DRY_RUN] TalkBI payload →', JSON.stringify(payload, null, 2));
     return { dryRun: true, payload };
   }
@@ -105,7 +122,7 @@ async function sendTalkBISubFlowByName(userNs, flowName, variables) {
   return data;
 }
 
-/* ============ Mapping conforme seu JSON ============ */
+// ===== Mapping (seu JSON do Datasigh) =====
 function mapAppointmentToContact(ag) {
   const name = ag?.paciente?.nome || 'Paciente';
   const phone = normalizePhoneBR(ag?.paciente?.celular);
@@ -122,7 +139,7 @@ function mapAppointmentToContact(ag) {
   };
 }
 
-/* ============ Handler Vercel ============ */
+// ===== Handler (Vercel) =====
 module.exports = async (req, res) => {
   // Aceita GET e POST (cron da Vercel usa GET)
   if (req.method !== 'GET' && req.method !== 'POST') {
@@ -131,20 +148,7 @@ module.exports = async (req, res) => {
 
   // Override de DRY_RUN via query/body (?dry=true/false)
   const dryParam = (req.method === 'GET' ? req.query?.dry : req.body?.dry);
-  if (typeof dryParam === 'string') {
-    process.env.DRY_RUN = String(dryParam);
-  }
-
-  // (Opcional) aceitar DD/MM/YYYY também
-  function fromAnyDate(s) {
-    if (!s) return tomorrowStr();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;               // YYYY-MM-DD
-    if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {                      // DD/MM/YYYY
-      const [d,m,y] = s.split('/');
-      return `${y}-${m}-${d}`;
-    }
-    return tomorrowStr();
-  }
+  if (typeof dryParam === 'string') process.env.DRY_RUN = String(dryParam);
 
   try {
     // Data de entrada: GET usa ?date=..., POST usa body.date
@@ -196,7 +200,6 @@ module.exports = async (req, res) => {
     return res.json({ date: dateStr, total: appts.length, sent, skipped, errors });
 
   } catch (err) {
-    // << este catch é o único que responde 500 >>
     const out = {
       message: err?.message,
       axios: {
@@ -211,4 +214,3 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: out });
   }
 };
-
