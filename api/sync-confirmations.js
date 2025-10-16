@@ -4,19 +4,24 @@ const axios = require('axios');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const tz = require('dayjs/plugin/timezone');
-// REMOVIDO: require('p-queue') (ESM-only)
+// p-queue é ESM → import dinâmico dentro do handler
 
 dayjs.extend(utc);
 dayjs.extend(tz);
 
-const TIMEZONE = process.env.TZ || 'America/Sao_Paulo';
+// ===== Timezone (Vercel reserva TZ; usamos APP_TZ e sanitizamos valores tipo ":UTC") =====
+const APP_TZ = process.env.APP_TZ || '';
+const RAW_TZ = APP_TZ || process.env.TZ || 'America/Sao_Paulo';
+const TIMEZONE = (RAW_TZ || '').replace(/^:/, '') || 'America/Sao_Paulo';
+
+// ===== Limites da fila =====
 const CONCURRENCY = Number(process.env.CONCURRENCY || 4);
 const INTERVAL_MS = Number(process.env.INTERVAL_MS || 1000);
 const INTERVAL_CAP = Number(process.env.INTERVAL_CAP || 8);
 
 // ===== Datasigh (SEM Bearer) =====
 const DATASIGH_BASE_URL = process.env.DATASIGH_BASE_URL || 'https://ws.datasigh.com.br/api/integracao/v1';
-const DATASIGH_API_KEY = process.env.DATASIGH_API_KEY || ''; // integration_hash:client_hash
+const DATASIGH_API_KEY = process.env.DATASIGH_API_KEY || ''; // integration_hash:client_hash (sem "Bearer")
 const DATASIGH_DATE_FORMAT = process.env.DATASIGH_DATE_FORMAT || 'DD/MM/YYYY';
 
 // ===== TalkBI =====
@@ -61,6 +66,7 @@ async function getAppointments(dateStr) {
 
   try {
     const { data } = await http.get(url, { params, headers });
+    // oficial: { agendas: [...], datas: [...] }
     if (Array.isArray(data?.agendas)) return data.agendas;
     if (Array.isArray(data)) return data;
     return [];
@@ -142,7 +148,7 @@ module.exports = async (req, res) => {
   if (typeof dryParam === 'string') process.env.DRY_RUN = String(dryParam);
 
   try {
-    // IMPORTANTE: p-queue v8 é ESM; usar dynamic import dentro do handler
+    // IMPORTANTE: p-queue v8 é ESM → import dinâmico aqui
     const { default: PQueue } = await import('p-queue');
 
     // Data de entrada
