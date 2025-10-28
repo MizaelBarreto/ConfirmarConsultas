@@ -177,6 +177,45 @@ async function sendTalkBISubFlowByName(userNs, flowName, variables) {
   return data;
 }
 
+// Extra: util para extrair user_ns de respostas diversas do TalkBI
+function extractUserNs(resp) {
+  try {
+    const items = extractSubscribers(resp);
+    const s = items[0] || resp?.data || resp;
+    return s?.user_ns || s?.ns || s?.id || s?.uuid || s?.user_id || null;
+  } catch {
+    return null;
+  }
+}
+
+// Cria subscriber no TalkBI com nome e telefone
+async function createTalkBISubscriber({ name, phone }) {
+  const url = `${TALKBI_BASE_URL}/subscriber/create`;
+  const payload = { name, phone };
+
+  if (isDry()) {
+    console.log('[DRY_RUN] TalkBI create →', JSON.stringify(payload, null, 2));
+    return `dry_${String(phone || '').replace(/\D/g, '') || 'user'}`;
+  }
+
+  const { data } = await http.post(url, payload, { headers: talkbiHeaders() });
+  return extractUserNs(data);
+}
+
+// Atualiza dados do subscriber (ex.: name)
+async function updateTalkBISubscriber(userNs, updates) {
+  const url = `${TALKBI_BASE_URL}/subscriber/update`;
+  const payload = { user_ns: userNs, ...updates };
+
+  if (isDry()) {
+    console.log('[DRY_RUN] TalkBI update →', JSON.stringify(payload, null, 2));
+    return { dryRun: true };
+  }
+
+  const { data } = await http.put(url, payload, { headers: talkbiHeaders() });
+  return data;
+}
+
 // ===== Mapping (Datasigh JSON) =====
 function mapAppointmentToContact(ag) {
   const name = ag?.paciente?.nome || 'Paciente';
@@ -226,16 +265,29 @@ module.exports = async (req, res) => {
           return { status: 'skipped', reason: 'missing_or_invalid_phone' };
         }
         try {
-          const userNs = await resolveTalkBIUserNsByPhone(contact.phone);
+          let userNs = await resolveTalkBIUserNsByPhone(contact.phone);
+
+          if (userNs) {
+            // Atualiza o nome antes de inscrever no flow
+            try { await updateTalkBISubscriber(userNs, { name: contact.name }); } catch (_) {}
+          } else {
+            // Não encontrou: cria novo com nome e telefone
+            try {
+              userNs = await createTalkBISubscriber({ name: contact.name, phone: contact.phone });
+            } catch (createErr) {
+              const payload = createErr?.response?.data || createErr?.message;
+              skipped++;
+              errors.push({ agendamento: contact.externalId, error: payload, action: 'create_subscriber' });
+              return { status: 'skipped', reason: 'create_failed' };
+            }
+          }
+
           if (!userNs) {
             skipped++;
-            errors.push({
-              agendamento: contact.externalId,
-              error: 'subscriber_not_found_by_phone',
-              phone: contact.phone
-            });
-            return { status: 'skipped', reason: 'subscriber_not_found' };
+            errors.push({ agendamento: contact.externalId, error: 'user_ns_not_resolved_after_create_or_update', phone: contact.phone });
+            return { status: 'skipped', reason: 'user_ns_missing' };
           }
+
           await sendTalkBISubFlowByName(userNs, TALKBI_FLOW_NAME, contact.variables);
           sent++;
           return { status: 'ok' };
